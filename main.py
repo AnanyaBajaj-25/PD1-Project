@@ -2,10 +2,9 @@ from agent import WikipediaAgent
 
 def main():
     agent = WikipediaAgent()
-    print("Welcome to the Wikipedia Agent! Ask me anything")
-
+    print("Welcome to the Travel Agent! Give me a country and I'll give you a summary of the country's culture, history, and tourist attractions.")
     while True:
-        question = input("Enter a question (or type 'exit' to quit): ")
+        question = input("Enter a destination: ")
         if question.lower() == "exit":
             break
         answer = agent.forward(question)
