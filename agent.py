@@ -1,192 +1,193 @@
+import warnings
 import dspy
-from typing import Dict, List, Tuple
 import wikipedia
+from wikipedia.exceptions import DisambiguationError, PageError
+
+# Import config to ensure LM is configured at module load time.
+from config import lm  # noqa: F401
+
 from signature import (
     CulturalEtiquette,
-    ReligionAndSpiritualSites,
-    FestivalsAndHolidays,
-    LanguageAndCommunication,
-    FoodAndDiningNorms,
-    HeritageAndMonuments,
+    SpiritualSites,
+    FestivalsHolidays,
+    LanguageCommunication,
+    FoodDiningNorms,
+    HeritageMonuments,
     ConversationStarters,
 )
-import config  # ensures dspy.configure runs on import
 
-CATEGORY_SECTION_MAP: Dict[str, List[str]] = {
-    "cultural_etiquette": [
-        "Culture",
-        "Customs",
-        "Etiquette",
-        "Social customs",
-        "Culture and society",
-    ],
-    "religion_and_spiritual_sites": [
-        "Religion",
-        "Religious sites",
-        "Spirituality",
-        "Religious tourism",
-    ],
-    "festivals_and_holidays": [
-        "Festivals",
-        "Holidays",
-        "Public holidays",
-        "Celebrations",
-    ],
-    "language_and_communication": [
-        "Language",
-        "Languages",
-        "Demographics",
-        "Communication",
-        "People",
-    ],
-    "food_and_dining_norms": [
-        "Cuisine",
-        "Food",
-        "Dining",
-        "Food and drink",
-    ],
-    "heritage_and_monuments": [
-        "Heritage",
-        "Monuments",
-        "Landmarks",
-        "Architecture",
-        "Tourism",
-    ],
-}
-
-FALLBACK_MESSAGES: Dict[str, str] = {
-    "cultural_etiquette": "No specific cultural etiquette information available.",
-    "religion_and_spiritual_sites": "No notable religious or spiritual sites found.",
-    "festivals_and_holidays": "No festivals or holidays information available.",
-    "language_and_communication": "No language or communication details available.",
-    "food_and_dining_norms": "No food or dining information available.",
-    "heritage_and_monuments": "No heritage or monuments information available.",
-}
-
-CATEGORY_SIGNATURES: Dict[str, Tuple[type, str]] = {
-    "cultural_etiquette": (CulturalEtiquette, "Cultural Etiquette: "),
-    "religion_and_spiritual_sites": (
-        ReligionAndSpiritualSites,
-        "Religion & Spiritual Sites: ",
-    ),
-    "festivals_and_holidays": (FestivalsAndHolidays, "Festivals & Holidays: "),
-    "language_and_communication": (
-        LanguageAndCommunication,
-        "Language & Communication: ",
-    ),
-    "food_and_dining_norms": (FoodAndDiningNorms, "Food & Dining Norms: "),
-    "heritage_and_monuments": (HeritageAndMonuments, "Heritage & Monuments: "),
-}
-
-CONVERSATION_STARTER_GUIDANCE = (
-    "Create concise, friendly conversation starters a respectful traveler can use when visiting the destination. "
-    "Reference the insights provided. Avoid stereotypes and stay positive."
+warnings.filterwarnings(
+    "ignore",
+    message="No parser was explicitly specified",
+    module="wikipedia"
 )
+
+GUIDELINES = {
+    "cultural_etiquette": (
+        "Summarize key etiquette practices and social norms a respectful visitor should know in 3 to 4 sentences. "
+        "Highlight concrete dos and don'ts, and note how locals perceive courteous behavior."
+    ),
+    "spiritual_sites": (
+        "Describe notable religious or spiritual sites with brief context in 3 to 4 sentences. "
+        "Mention respectful conduct or access requirements when appropriate."
+    ),
+    "festivals_holidays": (
+        "Explain major annual festivals or holidays in 3 to 4 sentences, including timing and what travelers should expect or do."
+    ),
+    "language_communication": (
+        "Provide language or communication tips in 3 to 4 sentences, covering greetings, key phrases, and interaction norms."
+    ),
+    "food_dining_norms": (
+        "Outline dining etiquette, signature dishes, and guidance on ordering or tipping in 3 to 4 sentences. Mention any taboos."
+    ),
+    "heritage_monuments": (
+        "Describe important heritage landmarks or monuments in 3 to 4 sentences, including historical context and visitor tips."
+    ),
+    "conversation_starters": (
+        "Craft 5 to 10 thoughtful questions a well-prepared traveler might ask locals. "
+        "Each question must explicitly reference a specific detail from the provided information (e.g., named festival, landmark, dish, etiquette point). "
+        "Write in first-person perspective (\"I\") to show the traveler already learned something and wants to dive deeper. Avoid generic questions and stereotypes."
+    ),
+}
 
 
 class WikipediaAgent(dspy.Module):
+    SECTION_KEYWORDS = {
+        "cultural_etiquette": ["culture", "custom", "etiquette", "society"],
+        "spiritual_sites": ["religion", "spiritual", "temple", "church", "mosque"],
+        "festivals_holidays": ["festival", "holiday", "celebration"],
+        "language_communication": ["language", "communication", "phrase", "dialect"],
+        "food_dining_norms": ["cuisine", "food", "dining", "gastronomy"],
+        "heritage_monuments": ["heritage", "monument", "landmark", "architecture", "historic"],
+    }
+
     def __init__(self):
         super().__init__()
-        self.predictors: Dict[str, dspy.Predict] = {
-            key: dspy.Predict(signature)
-            for key, (signature, _) in CATEGORY_SIGNATURES.items()
-        }
+        self.cultural_predictor = dspy.Predict(CulturalEtiquette)
+        self.spiritual_predictor = dspy.Predict(SpiritualSites)
+        self.festival_predictor = dspy.Predict(FestivalsHolidays)
+        self.language_predictor = dspy.Predict(LanguageCommunication)
+        self.food_predictor = dspy.Predict(FoodDiningNorms)
+        self.heritage_predictor = dspy.Predict(HeritageMonuments)
         self.conversation_predictor = dspy.Predict(ConversationStarters)
 
-    def _select_page(self, query: str):
+    def _resolve_page(self, destination: str):
         try:
-            candidates = wikipedia.search(query, results=5)
-        except Exception as exc:
-            raise RuntimeError(f"Error retrieving search results: {exc}") from exc
+            return wikipedia.page(destination, auto_suggest=False)
+        except DisambiguationError as exc:
+            for option in exc.options[:5]:
+                try:
+                    return wikipedia.page(option, auto_suggest=False)
+                except Exception:
+                    continue
+            raise
 
-        for title in candidates:
-            try:
-                return wikipedia.page(title, auto_suggest=False)
-            except wikipedia.DisambiguationError:
-                continue
-            except Exception:
-                continue
-        raise RuntimeError("No suitable Wikipedia page found for the destination.")
-
-    def _match_section(self, page, candidates: List[str]) -> str:
-        sections_lookup = {section.lower(): section for section in page.sections}
-        for candidate in candidates:
-            for lowered, actual in sections_lookup.items():
-                if candidate.lower() in lowered:
-                    content = page.section(actual)
-                    if content:
-                        return content
+    def _extract_section(self, page, keywords):
+        for section_title in page.sections:
+            title_lc = section_title.lower()
+            if any(keyword in title_lc for keyword in keywords):
+                try:
+                    section_text = page.section(section_title)
+                    if section_text:
+                        return section_text
+                except Exception:
+                    continue
         return ""
 
-    def retrieve_info(self, question: str) -> Dict[str, str]:
+    def retrieve_info(self, destination: str) -> dict:
         try:
-            page = self._select_page(question)
-        except RuntimeError as exc:
-            return {"error": str(exc)}
+            page = self._resolve_page(destination)
+        except (DisambiguationError, PageError) as exc:
+            return {"error": f"Could not uniquely identify '{destination}': {exc}"}
+        except Exception as exc:
+            return {"error": f"Error retrieving information for '{destination}': {exc}"}
 
-        structured_info: Dict[str, str] = {}
-        summary = getattr(page, "summary", "")
+        try:
+            overview = wikipedia.summary(page.title, sentences=5)
+        except Exception:
+            overview = page.summary if hasattr(page, "summary") else "Overview not available."
 
-        for category, section_candidates in CATEGORY_SECTION_MAP.items():
-            section_text = self._match_section(page, section_candidates)
-            if not section_text and summary:
-                section_text = summary
-            structured_info[category] = section_text or FALLBACK_MESSAGES[category]
+        info = {"destination": page.title, "overview": overview}
+        for key, keywords in self.SECTION_KEYWORDS.items():
+            section_text = self._extract_section(page, keywords)
+            if not section_text:
+                section_text = overview
+            info[key] = section_text
+        return info
 
-        structured_info["page_title"] = page.title
-        structured_info["page_url"] = getattr(page, "url", "")
-        return structured_info
-
-    def forward(self, question: str) -> str:
-        destination = question
-        info_sections = self.retrieve_info(destination)
-        if "error" in info_sections:
-            return info_sections["error"]
-
-        insights: Dict[str, str] = {}
-        conversation_context_lines: List[str] = []
-        for key, (_, display_title) in CATEGORY_SIGNATURES.items():
-            predictor = self.predictors[key]
-            section_info = info_sections.get(key, FALLBACK_MESSAGES[key])
-            result = predictor(question=destination, info=section_info)
-            answer_text = getattr(result, "answer", str(result))
-            cleaned_answer = answer_text.strip()
-            insights[display_title] = cleaned_answer
-            conversation_context_lines.append(f"{display_title}: {cleaned_answer}")
-
-        conversation_context = "\n".join(conversation_context_lines)
-        starters_prompt = (
-            f"{CONVERSATION_STARTER_GUIDANCE}\n\n"
-            f"Destination: {destination}\n"
-            f"Insights by topic:\n{conversation_context}"
+    def _compose_context(self, info: dict, key: str) -> str:
+        overview = info.get("overview", "")
+        section = info.get(key, "")
+        return (
+            f"Overview:\n{overview}\n\n"
+            f"Section focus ({key.replace('_', ' ')}):\n{section}"
         )
-        starters_result = self.conversation_predictor(
-            question=destination,
-            info=starters_prompt,
-        )
-        starters_answer = getattr(starters_result, "answer", str(starters_result)).strip()
 
-        lines = []
-        page_title = info_sections.get("page_title")
-        if page_title:
-            lines.append(f"Destination: {page_title}")
-        lines.append("")
+    def _compose_conversation_context(self, info: dict) -> str:
+        sections = [
+            info.get("overview", ""),
+            info.get("cultural_etiquette", ""),
+            info.get("festivals_holidays", ""),
+            info.get("food_dining_norms", ""),
+            info.get("language_communication", ""),
+            info.get("spiritual_sites", ""),
+            info.get("heritage_monuments", ""),
+        ]
+        joined = "\n\n".join(filter(None, sections))
+        return f"Destination insights:\n{joined}"
 
-        for display_title, answer in insights.items():
-            lines.append(f"{display_title}")
-            lines.append(f"{answer if answer else 'No details available.'}")
-            lines.append("")
+    def forward(self, destination: str) -> dict:
+        info = self.retrieve_info(destination)
+        if "error" in info:
+            return {"destination": destination, "error": info["error"]}
 
-        if starters_answer:
-            lines.append("Conversation Starters")
-            lines.append(starters_answer)
-            lines.append("")
+        responses = {
+            "destination": info["destination"],
+        }
 
-        page_url = info_sections.get("page_url")
-        if page_url:
-            lines.append(f"Source: {page_url}")
+        responses["cultural_etiquette"] = self.cultural_predictor(
+            destination=destination,
+            info=self._compose_context(info, "cultural_etiquette"),
+            guidance=GUIDELINES["cultural_etiquette"],
+        ).etiquette
 
-        return "\n".join(lines).strip()
+        responses["spiritual_sites"] = self.spiritual_predictor(
+            destination=destination,
+            info=self._compose_context(info, "spiritual_sites"),
+            guidance=GUIDELINES["spiritual_sites"],
+        ).sites
+
+        responses["festivals_holidays"] = self.festival_predictor(
+            destination=destination,
+            info=self._compose_context(info, "festivals_holidays"),
+            guidance=GUIDELINES["festivals_holidays"],
+        ).festivals
+
+        responses["language_communication"] = self.language_predictor(
+            destination=destination,
+            info=self._compose_context(info, "language_communication"),
+            guidance=GUIDELINES["language_communication"],
+        ).guidance_output
+
+        responses["food_dining_norms"] = self.food_predictor(
+            destination=destination,
+            info=self._compose_context(info, "food_dining_norms"),
+            guidance=GUIDELINES["food_dining_norms"],
+        ).dining
+
+        responses["heritage_monuments"] = self.heritage_predictor(
+            destination=destination,
+            info=self._compose_context(info, "heritage_monuments"),
+            guidance=GUIDELINES["heritage_monuments"],
+        ).highlights
+
+        responses["conversation_starters"] = self.conversation_predictor(
+            destination=destination,
+            info=self._compose_conversation_context(info),
+            guidance=GUIDELINES["conversation_starters"],
+        ).questions
+
+        return responses
 
 
 
